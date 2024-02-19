@@ -257,24 +257,25 @@ class TFDeep(Explainer):
 
         return self.phi_symbolics[i]
 
-    def shap_values(self, X, ranked_outputs=None, output_rank_order="max", check_additivity=True):
-        # check if we have multiple inputs
+   import numpy as np
+
+class ShapExplainer:
+    # Assuming phi_symbolic and run methods are defined in the class
+
+    def shap_values(self, X, time_dim=1, ranked_outputs=None, output_rank_order="max", check_additivity=True):
+        # Check if we have multiple inputs
         if not self.multi_input:
-            if isinstance(X, list) and len(X) != 1:
-                raise ValueError("Expected a single tensor as model input!")
-            elif not isinstance(X, list):
-                X = [X]
+            if not isinstance(X, np.ndarray) or X.ndim != 3:
+                raise ValueError("Expected a 3D numpy array as model input with dimensions (samples, time steps, features)!")
         else:
             assert isinstance(X, list), "Expected a list of model inputs!"
+
+        # Assuming X is a list of arrays for each input feature
         assert len(self.model_inputs) == len(X), "Number of model inputs (%d) does not match the number given (%d)!" % (len(self.model_inputs), len(X))
 
-        # rank and determine the model outputs that we will explain
+        # Rank and determine the model outputs that we will explain
         if ranked_outputs is not None and self.multi_output:
-            if not tf.executing_eagerly():
-                model_output_values = self.run(self.model_output, self.model_inputs, X)
-            else:
-                model_output_values = self.model(X)
-
+            model_output_values = self.model(X)
             if output_rank_order == "max":
                 model_output_ranks = np.argsort(-model_output_values)
             elif output_rank_order == "min":
@@ -282,49 +283,45 @@ class TFDeep(Explainer):
             elif output_rank_order == "max_abs":
                 model_output_ranks = np.argsort(np.abs(model_output_values))
             else:
-                emsg = "output_rank_order must be max, min, or max_abs!"
-                raise ValueError(emsg)
-            model_output_ranks = model_output_ranks[:,:ranked_outputs]
-        else:
-            model_output_ranks = np.tile(np.arange(len(self.phi_symbolics)), (X[0].shape[0], 1))
+                raise ValueError("output_rank_order must be max, min, or max_abs!")
 
-        # compute the attributions
+            model_output_ranks = model_output_ranks[:, :ranked_outputs]
+        else:
+            model_output_ranks = np.tile(np.arange(len(self.phi_symbolics)), (X.shape[0], 1))
+
+        # Compute the attributions
         output_phis = []
         for i in range(model_output_ranks.shape[1]):
             phis = []
             for k in range(len(X)):
                 phis.append(np.zeros(X[k].shape))
-            for j in range(X[0].shape[0]):
-                if (hasattr(self.data, '__call__')):
-                    bg_data = self.data([X[t][j] for t in range(len(X))])
-                    if not isinstance(bg_data, list):
-                        bg_data = [bg_data]
-                else:
-                    bg_data = self.data
+            for j in range(X.shape[0]):
+                # Assuming X is a 3D array with dimensions (samples, time steps, features)
+                # Extract the current time step for each feature
+                current_time_step = [X[t][j, :] for t in range(len(X))]
 
-                # tile the inputs to line up with the background data samples
-                tiled_X = [np.tile(X[t][j:j+1], (bg_data[t].shape[0],) + tuple([1 for k in range(len(X[t].shape)-1)])) for t in range(len(X))]
+                # Use the previous time steps as background data
+                bg_data = [X[t][:j, :] for t in range(len(X))]
 
-                # we use the first sample for the current sample and the rest for the references
-                joint_input = [np.concatenate([tiled_X[t], bg_data[t]], 0) for t in range(len(X))]
+                # Tile the inputs to line up with the background data samples
+                tiled_X = [np.tile(current_time_step[t], (bg_data[t].shape[0], 1)) for t in range(len(X))]
 
-                # run attribution computation graph
-                feature_ind = model_output_ranks[j,i]
+                # Concatenate the current time step with background data
+                joint_input = [np.concatenate([tiled_X[t], bg_data[t]], axis=0) for t in range(len(X))]
+
+                # Run attribution computation graph
+                feature_ind = model_output_ranks[j, i]
                 sample_phis = self.run(self.phi_symbolic(feature_ind), self.model_inputs, joint_input)
 
-                # assign the attributions to the right part of the output arrays
+                # Assign the attributions to the right part of the output arrays
                 for t in range(len(X)):
-                    phis[t][j] = (sample_phis[t][bg_data[t].shape[0]:] * (X[t][j] - bg_data[t])).mean(0)
+                    phis[t][j, :] = (sample_phis[t][bg_data[t].shape[0]:] * (current_time_step[t] - bg_data[t])).mean(0)
 
             output_phis.append(phis[0] if not self.multi_input else phis)
 
-        # check that the SHAP values sum up to the model output
+        # Check that the SHAP values sum up to the model output
         if check_additivity:
-            if not tf.executing_eagerly():
-                model_output = self.run(self.model_output, self.model_inputs, X)
-            else:
-                model_output = self.model(X)
-
+            model_output = self.model(X)
             _check_additivity(self, model_output, output_phis)
 
         if not self.multi_output:
@@ -333,6 +330,7 @@ class TFDeep(Explainer):
             return output_phis, model_output_ranks
         else:
             return output_phis
+
 
     def run(self, out, model_inputs, X):
         """ Runs the model while also setting the learning phase flags to False.
